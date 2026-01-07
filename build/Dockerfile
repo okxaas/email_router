@@ -1,4 +1,4 @@
-FROM golang:1.23.1 AS build-stage
+FROM golang:1.23.5 AS build-stage
 WORKDIR /app
 COPY go.* ./
 RUN go mod download
