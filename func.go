@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jhillyerd/enmime"
 	"github.com/sirupsen/logrus"
 	"github.com/yumusb/go-dkim" // DKIM 库，支持 RSA 和 Ed25519
 	"github.com/yumusb/go-smtp"
@@ -62,6 +64,7 @@ func extractEmails(str string) string {
 	}
 	return address.Address
 }
+
 func removeEmailHeaders(emailData []byte, headersToRemove []string) ([]byte, error) {
 	msg, err := mail.ReadMessage(bytes.NewReader(emailData))
 	if err != nil {
@@ -259,6 +262,16 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	if !isValidEmail(from) {
 		return errors.New("invalid email address format")
 	}
+
+	// 检查黑名单
+	if Rules.IsBlacklisted(from) {
+		logrus.Warnf("Email rejected by blacklist: %s - UUID: %s", from, s.UUID)
+		return &smtp.SMTPError{
+			Code:         554,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+			Message:      "Sender address rejected: Access denied",
+		}
+	}
 	s.from = from
 	spfCheckErr := SPFCheck(s)
 	if spfCheckErr != nil {
@@ -271,6 +284,17 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	if !isValidEmail(to) {
 		return errors.New("invalid email address format")
 	}
+
+	// 检查是否为禁用的收件人（别名）
+	if Rules.IsDisabledRecipient(to) {
+		logrus.Warnf("Recipient address disabled: %s - UUID: %s", to, s.UUID)
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 1, 1},
+			Message:      "Recipient address disabled",
+		}
+	}
+
 	s.to = append(s.to, to)
 	if !shouldForwardEmail(s.to) {
 		logrus.Warnf("Not handled by this mail server, %s - UUID: %s", s.to, s.UUID)
@@ -280,6 +304,193 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 			Message:      "Domain not handled by this mail server",
 		}
 	}
+	return nil
+}
+
+func handleAdminEmail(subject string) {
+	subject = strings.TrimSpace(subject)
+	logrus.Infof("Processing admin command: %s", subject)
+	parts := strings.Fields(subject)
+	if len(parts) < 2 {
+		logrus.Warn("Invalid admin command format")
+		return
+	}
+	action := strings.ToUpper(parts[0])
+	target := strings.ToLower(extractEmails(parts[1]))
+
+	switch action {
+	case "BLOCK":
+		if err := Rules.AddBlacklist(target); err != nil {
+			logrus.Errorf("Error blocking %s: %v", target, err)
+		} else {
+			logrus.Infof("Admin Command: Blocked %s", target)
+		}
+	case "UNBLOCK":
+		Rules.RemoveBlacklist(target)
+		logrus.Infof("Admin Command: Unblocked %s", target)
+	case "DISABLE":
+		if err := Rules.AddDisabledRecipient(target); err != nil {
+			logrus.Errorf("Error disabling recipient %s: %v", target, err)
+		} else {
+			logrus.Infof("Admin Command: Disabled recipient %s", target)
+		}
+	case "ENABLE":
+		Rules.RemoveDisabledRecipient(target)
+		logrus.Infof("Admin Command: Enabled recipient %s", target)
+	}
+}
+
+func (s *Session) Data(r io.Reader) error {
+	buf := new(bytes.Buffer)
+	_, err := buf.ReadFrom(r)
+	if err != nil {
+		return fmt.Errorf("error reading data: %v", err)
+	}
+	data := buf.Bytes()
+	env, err := enmime.ReadEnvelope(bytes.NewReader(data))
+	if err != nil {
+		logrus.Errorf("Failed to parse email: %v - UUID: %s", err, s.UUID)
+		return err
+	}
+	logrus.Infof("Received email: From=%s HeaderTo=%s ParsedTo=%v Subject=%s - UUID: %s",
+		env.GetHeader("From"),
+		env.GetHeader("To"),
+		s.to,
+		env.GetHeader("Subject"),
+		s.UUID)
+
+	// 检查是否是管理指令邮件
+	sender := extractEmails(env.GetHeader("From"))
+	recipientAddress := getFirstMatchingEmail(s.to)
+
+	if strings.HasPrefix(recipientAddress, "router-admin@") {
+		// SECURITY: Use s.from (Envelope Sender) instead of header From to prevent spoofing
+		if CONFIG.SMTP.PrivateEmail != "" && strings.EqualFold(s.from, CONFIG.SMTP.PrivateEmail) {
+			handleAdminEmail(env.GetHeader("Subject"))
+			return nil // 指令执行完毕，不再转发
+		}
+		// 即使不是 private email 发来的，如果是 router-admin 也应该拦截，避免滥用
+		// 或者是 honey pot?
+		logrus.Warnf("Unauthorized or invalid admin command attempt from Envelope[%s] Header[%s] to %s - UUID: %s", s.from, sender, recipientAddress, s.UUID)
+		return nil
+	}
+
+	var attachments []string
+	for _, attachment := range env.Attachments {
+		disposition := attachment.Header.Get("Content-Disposition")
+		if disposition != "" {
+			_, params, _ := mime.ParseMediaType(disposition)
+			if filename, ok := params["filename"]; ok {
+				attachments = append(attachments, filename)
+			}
+		}
+	}
+
+	// 构造管理链接
+	recipientDomain := getDomainFromEmail(recipientAddress)
+	adminEmail := fmt.Sprintf("router-admin@%s", recipientDomain)
+	blockSub := url.QueryEscape(fmt.Sprintf("BLOCK %s", sender))
+	disableSub := url.QueryEscape(fmt.Sprintf("DISABLE %s", recipientAddress))
+
+	actionLinks := fmt.Sprintf("\n\n🛡️ Quick Actions:\n"+
+		"🚫 Block Sender: mailto:%s?subject=%s\n"+
+		"🔕 Disable Alias: mailto:%s?subject=%s",
+		adminEmail, blockSub, adminEmail, disableSub)
+
+	parsedContent := fmt.Sprintf(
+		"📧 New Email Notification\n"+
+			"=================================\n"+
+			"📤 From: %s\n"+
+			"📬 To: %s\n"+
+			"---------------------------------\n"+
+			"🔍 SPF Status: %s\n"+
+			"📝 Subject: %s\n"+
+			"📅 Date: %s\n"+
+			"📄 Content-Type: %s\n"+
+			"=================================\n\n"+
+			"✉️ Email Body:\n\n%s\n\n"+
+			"=================================\n"+
+			"📎 Attachments:\n%s\n"+
+			"=================================\n"+
+			"🔑 UUID: %s%s",
+		s.from,
+		strings.Join(s.to, ", "),
+		s.spfResult,
+		env.GetHeader("Subject"),
+		env.GetHeader("Date"),
+		getPrimaryContentType(env.GetHeader("Content-Type")),
+		env.Text,
+		strings.Join(attachments, "\n"),
+		s.UUID,
+		actionLinks, // 追加链接
+	)
+	parsedTitle := fmt.Sprintf("📬 New Email: %s", env.GetHeader("Subject"))
+	s.msgId = env.GetHeader("Message-ID")
+	if s.msgId == "" {
+		s.msgId = env.GetHeader("Message-Id")
+	}
+
+	if !strings.EqualFold(sender, CONFIG.SMTP.PrivateEmail) && !strings.Contains(recipientAddress, "_at_") && !recipientPattern.MatchString(recipientAddress) {
+		// 验证收件人的规则
+		logrus.Warnf("不符合规则的收件人，需要是 random@qq.com、ran-dom@qq.com，当前为 %s - UUID: %s", recipientAddress, s.UUID)
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 1, 0},
+			Message:      "Invalid recipient",
+		}
+	}
+	var outsite2private bool
+	outsite2private = false
+	if CONFIG.SMTP.PrivateEmail != "" {
+		formattedSender := ""
+		targetAddress := ""
+		if strings.EqualFold(sender, CONFIG.SMTP.PrivateEmail) && strings.Contains(recipientAddress, "_at_") {
+			// 来自私密邮箱，需要将邮件转发到目标邮箱
+			originsenderEmail, selfsenderEmail := parseEmails(recipientAddress)
+			targetAddress = originsenderEmail
+			formattedSender = selfsenderEmail
+			outsite2private = false
+			logrus.Infof("Private 2 outside, ([%s] → [%s]) changed to ([%s] → [%s]) - UUID: %s", sender, recipientAddress, formattedSender, targetAddress, s.UUID)
+		} else if strings.EqualFold(sender, CONFIG.SMTP.PrivateEmail) && !strings.Contains(recipientAddress, "_at_") {
+			// 来自私密邮箱，但目标邮箱写的有问题
+			logrus.Infof("not need forward, from %s to %s - UUID: %s", sender, recipientAddress, s.UUID)
+			// 不需要转发，但是可能需要通知给用户。
+			return nil
+		} else {
+			// 来自非私密邮箱，需要将邮件转发到私密邮箱
+			domain := getDomainFromEmail(recipientAddress)
+			formattedSender = fmt.Sprintf("%s_%s@%s",
+				strings.ReplaceAll(strings.ReplaceAll(sender, "@", "_at_"), ".", "_"),
+				strings.Split(recipientAddress, "@")[0],
+				domain)
+			targetAddress = CONFIG.SMTP.PrivateEmail
+			logrus.Infof("Outside 2 private, ([%s] → [%s]) changed to ([%s] → [%s]) - UUID: %s", sender, recipientAddress, formattedSender, targetAddress, s.UUID)
+			outsite2private = true
+		}
+		go forwardEmailToTargetAddress(data, formattedSender, targetAddress, s)
+		if outsite2private {
+			if CONFIG.Telegram.ChatID != "" {
+				go sendToTelegramBot(parsedContent, s.UUID)
+				if CONFIG.Telegram.SendEML {
+					go sendRawEMLToTelegram(data, env.GetHeader("Subject"), s.UUID)
+				} else {
+					logrus.Info("Telegram EML is disabled.")
+				}
+			}
+			// Webhook
+			if CONFIG.Webhook.Enabled {
+				go func() {
+					_, err := sendWebhook(CONFIG.Webhook, parsedTitle, env.Text, s.UUID)
+					if err != nil {
+						logrus.Errorf("Failed to send webhook: %v", err)
+					}
+				}()
+			}
+		}
+	} else {
+		logrus.Warnf("Private email not configured - UUID: %s", s.UUID)
+	}
+
 	return nil
 }
 func splitMessage(message string, maxLength int) []string {

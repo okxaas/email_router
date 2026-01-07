@@ -30,10 +30,13 @@ type SMTPConfig struct {
 	CertFile           string   `yaml:"cert_file"`
 	KeyFile            string   `yaml:"key_file"`
 	EnableDMARC        bool     `yaml:"enable_dmarc"`
-	DKIMPrivateKey     string   `yaml:"dkim_private_key"`   // 第一个 DKIM 密钥
-	DKIMSelector       string   `yaml:"dkim_selector"`      // 第一个选择器
-	DKIMPrivateKey2    string   `yaml:"dkim_private_key_2"` // 第二个 DKIM 密钥（可选，用于双签名）
-	DKIMSelector2      string   `yaml:"dkim_selector_2"`    // 第二个选择器（可选）
+	DKIMPrivateKey     string   `yaml:"dkim_private_key"`    // 第一个 DKIM 密钥
+	DKIMSelector       string   `yaml:"dkim_selector"`       // 第一个选择器
+	DKIMPrivateKey2    string   `yaml:"dkim_private_key_2"`  // 第二个 DKIM 密钥（可选，用于双签名）
+	DKIMSelector2      string   `yaml:"dkim_selector_2"`     // 第二个选择器（可选）
+	Blacklist          []string `yaml:"blacklist"`           // 黑名单列表（发件人）
+	DisabledRecipients []string `yaml:"disabled_recipients"` // 禁用的收件人列表（别名失效）
+	MaxMessageBytes    int      `yaml:"max_message_bytes"`
 }
 
 type TelegramConfig struct {

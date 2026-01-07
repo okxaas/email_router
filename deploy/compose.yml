@@ -25,6 +25,7 @@ services:
     volumes:
       - ./config.yml:/app/config.yml:ro
       - ./cert:/cert/
+      - ./data:/app/data
     restart: always
     environment:
       - MXDOMAIN=${MXDOMAIN}

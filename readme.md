@@ -117,6 +117,14 @@ webhook:
 
 - `listen_address_smtps` 如不需要465端口可留空
 
+  # 高级反垃圾配置
+  blacklist:
+    - "spammer@bad.com"        # 拦截特定发件人
+    - "@spam-domain.com"       # 拦截特定域名发来的邮件
+  
+  disabled_recipients:
+    - "leaked-alias@my.com"    # 停用特定的收信别名
+
 ### 4. 生成 DKIM 密钥
 #### 生成 RSA 密钥 (兼容性好)
 ```bash
@@ -155,6 +163,22 @@ docker compose up -d
 同样的，直接回复收到的转发的来信，服务器也会帮你自动转发回去。  
 
 需要注意的是，发信非常依赖信誉，你的IP信誉、域名信誉、PTR设置等。如果你发现私人邮箱收到的邮件在垃圾箱，可以手动加白下，很有可能发送给别人的也进了垃圾箱。
+
+### 7. 邮件管理功能 (New!)
+
+您可以通过发送邮件到 `router-admin@<您的域名>` 来动态管理黑名单和禁用别名。必须使用配置文件中 `private_email` 指定的邮箱发送指令。
+
+**指令格式（邮件主题 Subject）**:
+- 屏蔽发件人: `BLOCK spammer@bad.com`
+- 解除屏蔽: `UNBLOCK spammer@bad.com`
+- 禁用别名: `DISABLE leaked@yourdomain.com`
+- 启用别名: `ENABLE leaked@yourdomain.com`
+
+**Telegram 快捷操作**:
+收到的邮件转发通知中，底部会附带 `Block Sender` 和 `Disable Alias` 的 `mailto` 链接。点击链接会自动创建一封填好指令的邮件，您只需点击发送即可完成操作。
+
+### 规则持久化
+所有的动态规则会保存在 `data/rules.json` 文件中，重启服务后依然有效。
 
 ## 其他问题
 

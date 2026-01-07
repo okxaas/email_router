@@ -24,6 +24,13 @@ smtp:
     ...
     -----END PRIVATE KEY-----
   dkim_selector_2: "ed"   # 第二个选择器（可选）
+  blacklist:              # 黑名单列表（可选）
+    - "spammer@bad.com"   # 精确匹配
+    - "@bad-domain.com"   # 域名匹配
+    - "phishing.com"      # 域名匹配（自动匹配 @phishing.com）
+  disabled_recipients:    # 禁用的收件人列表（别名失效）
+    - "garbage@my-domain.com"  # 禁用特定别名
+    - "temp-123@my-domain.com"
 webhook:
   enabled: False                        # 是否启用Webhook功能
   method: "POST"                       # HTTP方法，例如POST或GET

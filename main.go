@@ -1,21 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
-	"mime"
 	"net"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/jhillyerd/enmime"
-	//"github.com/mileusna/spf"
 	"blitiri.com.ar/go/spf"
 	"github.com/sirupsen/logrus" // 引入logrus包
 	"github.com/yumusb/go-smtp"
@@ -32,6 +26,11 @@ func main() {
 	if err != nil {
 		logrus.Fatalf("Error loading config: %v", err)
 	}
+	// 初始化规则管理器
+	if _, err := os.Stat("data"); os.IsNotExist(err) {
+		os.Mkdir("data", 0755)
+	}
+	InitRuleManager("data/rules.json")
 	// 输出DMARC配置信息
 	if CONFIG.SMTP.EnableDMARC {
 		// 检查私钥有效性
@@ -140,13 +139,18 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	// Default MaxMessageBytes to 25MB if not set
+	if CONFIG.SMTP.MaxMessageBytes == 0 {
+		CONFIG.SMTP.MaxMessageBytes = 25 * 1024 * 1024
+	}
+
 	// Plain SMTP server with STARTTLS support
 	plainServer := smtp.NewServer(be)
 	plainServer.Addr = CONFIG.SMTP.ListenAddress
 	plainServer.Domain = GetEnv("MXDOMAIN", "localhost")
 	plainServer.WriteTimeout = 10 * time.Second
 	plainServer.ReadTimeout = 10 * time.Second
-	plainServer.MaxMessageBytes = 1024 * 1024
+	plainServer.MaxMessageBytes = int64(CONFIG.SMTP.MaxMessageBytes)
 	plainServer.MaxRecipients = 50
 	plainServer.AllowInsecureAuth = false // Change to true if you want to allow plain auth before STARTTLS (not recommended)
 
@@ -177,7 +181,12 @@ func main() {
 		logrus.Info("Server stopped gracefully")
 	} else {
 		// Certificate loaded successfully, configure STARTTLS
-		plainServer.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cer}}
+		// Security: Enforce MinVersion TLS 1.2
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{cer},
+			MinVersion:   tls.VersionTLS12,
+		}
+		plainServer.TLSConfig = tlsConfig
 
 		// Submission server (port 587) - uses STARTTLS, not implicit TLS
 		submissionServer := smtp.NewServer(be)
@@ -185,10 +194,10 @@ func main() {
 		submissionServer.Domain = GetEnv("MXDOMAIN", "localhost")
 		submissionServer.WriteTimeout = 10 * time.Second
 		submissionServer.ReadTimeout = 10 * time.Second
-		submissionServer.MaxMessageBytes = 1024 * 1024
+		submissionServer.MaxMessageBytes = int64(CONFIG.SMTP.MaxMessageBytes)
 		submissionServer.MaxRecipients = 50
 		submissionServer.AllowInsecureAuth = false
-		submissionServer.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cer}}
+		submissionServer.TLSConfig = tlsConfig
 
 		// SMTPS server (port 465) - uses implicit TLS
 		var smtpsServer *smtp.Server
@@ -198,10 +207,10 @@ func main() {
 			smtpsServer.Domain = GetEnv("MXDOMAIN", "localhost")
 			smtpsServer.WriteTimeout = 10 * time.Second
 			smtpsServer.ReadTimeout = 10 * time.Second
-			smtpsServer.MaxMessageBytes = 1024 * 1024
+			smtpsServer.MaxMessageBytes = int64(CONFIG.SMTP.MaxMessageBytes)
 			smtpsServer.MaxRecipients = 50
 			smtpsServer.AllowInsecureAuth = false
-			smtpsServer.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cer}}
+			smtpsServer.TLSConfig = tlsConfig
 		}
 
 		// Start the plain SMTP server (port 25) with STARTTLS support
@@ -289,127 +298,4 @@ func SPFCheck(s *Session) *smtp.SMTPError {
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 2}, Message: "SPF check permanent error"}
 	}
 	return nil // SPF 检查通过，返回 nil
-}
-
-func (s *Session) Data(r io.Reader) error {
-	buf := new(bytes.Buffer)
-	_, err := buf.ReadFrom(r)
-	if err != nil {
-		return fmt.Errorf("error reading data: %v", err)
-	}
-	data := buf.Bytes()
-	env, err := enmime.ReadEnvelope(bytes.NewReader(data))
-	if err != nil {
-		logrus.Errorf("Failed to parse email: %v - UUID: %s", err, s.UUID)
-		return err
-	}
-	logrus.Infof("Received email: From=%s HeaderTo=%s ParsedTo=%v Subject=%s - UUID: %s",
-		env.GetHeader("From"),
-		env.GetHeader("To"),
-		s.to,
-		env.GetHeader("Subject"),
-		s.UUID)
-
-	var attachments []string
-	for _, attachment := range env.Attachments {
-		disposition := attachment.Header.Get("Content-Disposition")
-		if disposition != "" {
-			_, params, _ := mime.ParseMediaType(disposition)
-			if filename, ok := params["filename"]; ok {
-				attachments = append(attachments, filename)
-			}
-		}
-	}
-	parsedContent := fmt.Sprintf(
-		"📧 New Email Notification\n"+
-			"=================================\n"+
-			"📤 From: %s\n"+
-			"📬 To: %s\n"+
-			"---------------------------------\n"+
-			"🔍 SPF Status: %s\n"+
-			"📝 Subject: %s\n"+
-			"📅 Date: %s\n"+
-			"📄 Content-Type: %s\n"+
-			"=================================\n\n"+
-			"✉️ Email Body:\n\n%s\n\n"+
-			"=================================\n"+
-			"📎 Attachments:\n%s\n"+
-			"=================================\n"+
-			"🔑 UUID: %s",
-		s.from,
-		strings.Join(s.to, ", "),
-		s.spfResult,
-		env.GetHeader("Subject"),
-		env.GetHeader("Date"),
-		getPrimaryContentType(env.GetHeader("Content-Type")),
-		env.Text,
-		strings.Join(attachments, "\n"),
-		s.UUID,
-	)
-	parsedTitle := fmt.Sprintf("📬 New Email: %s", env.GetHeader("Subject"))
-	s.msgId = env.GetHeader("Message-ID")
-	if s.msgId == "" {
-		s.msgId = env.GetHeader("Message-Id")
-	}
-	sender := extractEmails(env.GetHeader("From"))
-	recipient := getFirstMatchingEmail(s.to)
-	if !strings.EqualFold(sender, CONFIG.SMTP.PrivateEmail) && !strings.Contains(recipient, "_at_") && !recipientPattern.MatchString(recipient) {
-		// 验证收件人的规则
-		logrus.Warnf("不符合规则的收件人，需要是 random@qq.com、ran-dom@qq.com，当前为 %s - UUID: %s", recipient, s.UUID)
-		return &smtp.SMTPError{
-			Code:         550,
-			EnhancedCode: smtp.EnhancedCode{5, 1, 0},
-			Message:      "Invalid recipient",
-		}
-	}
-	var outsite2private bool
-	outsite2private = false
-	if CONFIG.SMTP.PrivateEmail != "" {
-		formattedSender := ""
-		targetAddress := ""
-		if strings.EqualFold(sender, CONFIG.SMTP.PrivateEmail) && strings.Contains(recipient, "_at_") {
-			// 来自私密邮箱，需要将邮件转发到目标邮箱
-			originsenderEmail, selfsenderEmail := parseEmails(recipient)
-			targetAddress = originsenderEmail
-			formattedSender = selfsenderEmail
-			outsite2private = false
-			logrus.Infof("Private 2 outside, ([%s] → [%s]) changed to ([%s] → [%s]) - UUID: %s", sender, recipient, formattedSender, targetAddress, s.UUID)
-		} else if strings.EqualFold(sender, CONFIG.SMTP.PrivateEmail) && !strings.Contains(recipient, "_at_") {
-			// 来自私密邮箱，但目标邮箱写的有问题
-			logrus.Infof("not need forward, from %s to %s - UUID: %s", sender, recipient, s.UUID)
-			// 不需要转发，但是可能需要通知给用户。
-			return nil
-		} else {
-			// 来自非私密邮箱，需要将邮件转发到私密邮箱
-			domain := getDomainFromEmail(recipient)
-			formattedSender = fmt.Sprintf("%s_%s@%s",
-				strings.ReplaceAll(strings.ReplaceAll(sender, "@", "_at_"), ".", "_"),
-				strings.Split(recipient, "@")[0],
-				domain)
-			targetAddress = CONFIG.SMTP.PrivateEmail
-			logrus.Infof("Outside 2 private, ([%s] → [%s]) changed to ([%s] → [%s]) - UUID: %s", sender, recipient, formattedSender, targetAddress, s.UUID)
-			outsite2private = true
-		}
-		go forwardEmailToTargetAddress(data, formattedSender, targetAddress, s)
-		if outsite2private {
-			if CONFIG.Telegram.ChatID != "" {
-				go sendToTelegramBot(parsedContent, s.UUID)
-				if CONFIG.Telegram.SendEML {
-					go sendRawEMLToTelegram(data, env.GetHeader("Subject"), s.UUID)
-				} else {
-					logrus.Info("Telegram EML is disabled.")
-				}
-			} else {
-				logrus.Info("Telegram is disabled.")
-			}
-			if CONFIG.Webhook.Enabled {
-				go sendWebhook(CONFIG.Webhook, parsedTitle, parsedContent, s.UUID)
-			} else {
-				logrus.Info("Webhook is disabled.")
-			}
-		}
-	} else {
-		logrus.Info("Email forwarder is disabled.")
-	}
-	return nil
 }
