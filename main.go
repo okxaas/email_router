@@ -48,28 +48,50 @@ func main() {
 		logrus.Infof("DMARC 未启用")
 	}
 	// 推荐的DNS记录
-	for _, domain := range CONFIG.SMTP.AllowedDomains {
-		logrus.Infof("\n域名: %s", domain)
-		logrus.Infof(";; A Records")
-		logrus.Infof("mx.%s.\t1\tIN\tA\t%s", domain, "ip地址")
-		logrus.Infof("\n;; MX Records")
-		logrus.Infof("%s.\t1\tIN\tMX\t5 mx.%s.", domain, domain)
-		logrus.Infof("\n;; TXT Records")
-		logrus.Infof("%s.\t1\tIN\tTXT\t\"v=spf1 mx:%s -all\"", domain, domain)
-		if CONFIG.SMTP.EnableDMARC {
-			logrus.Infof("_dmarc.%s.\t1\tIN\tTXT\t\"v=DMARC1; p=reject; ruf=mailto:dmarc@%s; fo=1;\"",
-				domain, domain)
-			logrus.Infof("%s._domainkey.%s.\t1\tIN\tTXT\t\"v=DKIM1; k=rsa; p=%s\"",
-				CONFIG.SMTP.DKIMSelector, domain, func() string {
-					pubKey, pkErr := extractPublicKeyInfo(CONFIG.SMTP.DKIMPrivateKey)
-					if pkErr != nil {
-						logrus.Errorf("获取公钥信息失败: %v", pkErr)
-						return ""
-					}
-					return pubKey
-				}())
+	logrus.Info("╔══════════════════════════════════════════════════════════════════╗")
+	logrus.Info("║                    📋 推荐的 DNS 记录配置                          ║")
+	logrus.Info("╚══════════════════════════════════════════════════════════════════╝")
+	for i, domain := range CONFIG.SMTP.AllowedDomains {
+		if i > 0 {
+			logrus.Info("")
 		}
+		logrus.Infof("┌─────────────────────────────────────────────────────────────────┐")
+		logrus.Infof("│  🌐 域名: %-54s │", domain)
+		logrus.Infof("├─────────────────────────────────────────────────────────────────┤")
+		logrus.Infof("│  📍 A 记录                                                      │")
+		logrus.Infof("│     mx.%s.  IN  A  <您的服务器IP>", domain)
+		logrus.Infof("├─────────────────────────────────────────────────────────────────┤")
+		logrus.Infof("│  📨 MX 记录                                                     │")
+		logrus.Infof("│     %s.  IN  MX  5 mx.%s.", domain, domain)
+		logrus.Infof("├─────────────────────────────────────────────────────────────────┤")
+		logrus.Infof("│  📝 TXT 记录 (SPF)                                              │")
+		logrus.Infof("│     %s.  IN  TXT  \"v=spf1 mx:%s -all\"", domain, domain)
+		if CONFIG.SMTP.EnableDMARC {
+			logrus.Infof("├─────────────────────────────────────────────────────────────────┤")
+			logrus.Infof("│  🛡️  TXT 记录 (DMARC)                                            │")
+			logrus.Infof("│     _dmarc.%s.  IN  TXT", domain)
+			logrus.Infof("│     \"v=DMARC1; p=reject; ruf=mailto:dmarc@%s; fo=1;\"", domain)
+			logrus.Infof("├─────────────────────────────────────────────────────────────────┤")
+			logrus.Infof("│  🔐 TXT 记录 (DKIM)                                             │")
+			logrus.Infof("│     %s._domainkey.%s.  IN  TXT", CONFIG.SMTP.DKIMSelector, domain)
+			pubKey, pkErr := extractPublicKeyInfo(CONFIG.SMTP.DKIMPrivateKey)
+			if pkErr != nil {
+				logrus.Errorf("获取公钥信息失败: %v", pkErr)
+			} else {
+				// 将公钥分成多行显示，每行约60字符
+				keyStr := fmt.Sprintf("\"v=DKIM1; k=rsa; p=%s\"", pubKey)
+				for j := 0; j < len(keyStr); j += 60 {
+					end := j + 60
+					if end > len(keyStr) {
+						end = len(keyStr)
+					}
+					logrus.Infof("│     %s", keyStr[j:end])
+				}
+			}
+		}
+		logrus.Infof("└─────────────────────────────────────────────────────────────────┘")
 	}
+	logrus.Info("")
 
 	logrus.Infof("SMTP 监听地址: %s", CONFIG.SMTP.ListenAddress)
 	logrus.Infof("SMTP TLS 监听地址: %s", CONFIG.SMTP.ListenAddressTls)
