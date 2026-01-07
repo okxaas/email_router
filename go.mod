@@ -1,6 +1,6 @@
 module email_router
 
-go 1.23.0
+go 1.23.5
 
 toolchain go1.24.1
 
@@ -11,7 +11,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jhillyerd/enmime v1.3.0
 	github.com/sirupsen/logrus v1.9.3
-	github.com/toorop/go-dkim v0.0.0-20250226130143-9025cce95817
+	github.com/yumusb/go-dkim v0.0.0-20260107034117-adab41f80e67
 	github.com/yumusb/go-smtp v0.0.0-20241013125232-63ad8b4f888a
 )
 

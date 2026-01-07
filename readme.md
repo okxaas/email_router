@@ -87,7 +87,12 @@ smtp:
   private_email: "root123645@foxmail.com"
   enable_dmarc: false                    # 是否启用DMARC签名
   dkim_selector: "dkim"                  # DKIM选择器
-  dkim_private_key: |                    # DKIM私钥（仅enable_dmarc为true时需要）
+  dkim_private_key: |                    # DKIM私钥（支持 RSA/Ed25519，仅enable_dmarc为true时需要）
+    -----BEGIN PRIVATE KEY-----
+    ...
+    -----END PRIVATE KEY-----
+  dkim_selector_2: "ed"                  # 第二个 DKIM 选择器（可选，用于双签名）
+  dkim_private_key_2: |                  # 第二个 DKIM 私钥（可选，通常配合Ed25519使用）
     -----BEGIN PRIVATE KEY-----
     ...
     -----END PRIVATE KEY-----
@@ -110,7 +115,22 @@ webhook:
 - `private_email` 修改为要转发到的邮箱
 - `listen_address_smtps` 如不需要465端口可留空
 
-### 4. 启动
+- `listen_address_smtps` 如不需要465端口可留空
+
+### 4. 生成 DKIM 密钥
+#### 生成 RSA 密钥 (兼容性好)
+```bash
+openssl genrsa -out dkim_rsa.pem 2048
+```
+将生成的 `dkim_rsa.pem` 内容填入 `dkim_private_key`。
+
+#### 生成 Ed25519 密钥 (更安全、更短)
+```bash
+openssl genpkey -algorithm ed25519 -out dkim_ed25519.pem
+```
+将生成的 `dkim_ed25519.pem` 内容填入 `dkim_private_key_2`，并设置 `dkim_selector_2`。
+
+### 5. 启动
 ```shell 
 docker compose up -d 
 ```

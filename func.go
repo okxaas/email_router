@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
@@ -23,7 +24,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
-	"github.com/toorop/go-dkim" // 添加 DKIM 库
+	"github.com/yumusb/go-dkim" // DKIM 库，支持 RSA 和 Ed25519
 	"github.com/yumusb/go-smtp"
 	"gopkg.in/yaml.v2"
 )
@@ -548,13 +549,13 @@ func forwardEmailToTargetAddress(emailData []byte, formattedSender string, targe
 	// Modify email data
 	var modifiedEmailData []byte
 	var headerErr error
-	
+
 	modifiedEmailData, headerErr = removeEmailHeaders(emailData, []string{"DKIM-*", "Authentication-*"})
 	if headerErr != nil {
 		logrus.Warnf("Failed to remove headers: %v - UUID: %s", headerErr, s.UUID)
 		modifiedEmailData = emailData // fallback to original
 	}
-	
+
 	if strings.EqualFold(targetAddress, CONFIG.SMTP.PrivateEmail) {
 		modifiedEmailData, headerErr = modifyEmailHeaders(modifiedEmailData, formattedSender, "")
 		if headerErr != nil {
@@ -647,7 +648,8 @@ func sendWebhook(config WebhookConfig, title, content string, traceid string) (*
 	}
 	var requestBody []byte
 	var err error
-	if config.BodyType == "json" {
+	switch config.BodyType {
+	case "json":
 		body := make(map[string]string)
 		for key, value := range config.Body {
 			formattedValue := strings.ReplaceAll(value, "{{.Title}}", title)
@@ -659,7 +661,7 @@ func sendWebhook(config WebhookConfig, title, content string, traceid string) (*
 			logrus.Errorf("Failed to marshal JSON body - TraceID: %s, Error: %v", traceid, err)
 			return nil, err
 		}
-	} else if config.BodyType == "form" {
+	case "form":
 		form := url.Values{}
 		for key, value := range config.Body {
 			formattedValue := strings.ReplaceAll(value, "{{.Title}}", title)
@@ -676,9 +678,10 @@ func sendWebhook(config WebhookConfig, title, content string, traceid string) (*
 	for key, value := range config.Headers {
 		req.Header.Set(key, value)
 	}
-	if config.BodyType == "json" {
+	switch config.BodyType {
+	case "json":
 		req.Header.Set("Content-Type", "application/json")
-	} else if config.BodyType == "form" {
+	case "form":
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 	client := &http.Client{
@@ -729,62 +732,68 @@ func applyDMARCSignature(emailData []byte, sender, domain, uuid string) ([]byte,
 		logrus.Errorf("DKIM选择器未配置，无法应用DMARC签名 - UUID: %s", uuid)
 		return nil, fmt.Errorf("DKIM selector not configured")
 	}
-	// 解析邮件
-	logrus.Debugf("解析邮件内容以应用DMARC签名 - UUID: %s", uuid)
-	msg, err := mail.ReadMessage(bytes.NewReader(emailData))
-	if err != nil {
-		logrus.Errorf("解析邮件失败: %v - UUID: %s", err, uuid)
-		return nil, fmt.Errorf("failed to parse email: %v", err)
-	}
-	// 读取原始邮件头
-	headers := make(map[string]string)
-	for k, v := range msg.Header {
-		headers[k] = strings.Join(v, ", ")
-	}
-	logrus.Debugf("成功读取邮件头，准备添加DKIM签名 - UUID: %s", uuid)
-	// 准备DKIM签名所需的头部
-	// 这里需要使用第三方库来实现DKIM签名
-	logrus.Infof("使用域名 [%s] 和选择器 [%s] 生成DKIM签名 - UUID: %s",
-		domain, CONFIG.SMTP.DKIMSelector, uuid)
 
-	// 生成DKIM签名
-	dkimSignature, err := generateDKIMSignature(emailData, CONFIG.SMTP.DKIMPrivateKey, CONFIG.SMTP.DKIMSelector, domain)
+	signedData := emailData
+	var err error
+
+	// 第一个签名
+	_, keyType1, _ := extractPublicKeyInfo(CONFIG.SMTP.DKIMPrivateKey)
+	logrus.Infof("使用域名 [%s] 和选择器 [%s] 生成第一个DKIM签名 (算法: %s) - UUID: %s",
+		domain, CONFIG.SMTP.DKIMSelector, keyType1, uuid)
+
+	signedData, err = generateDKIMSignature(signedData, CONFIG.SMTP.DKIMPrivateKey, CONFIG.SMTP.DKIMSelector, domain)
 	if err != nil {
-		logrus.Errorf("生成DKIM签名失败: %v - UUID: %s", err, uuid)
+		logrus.Errorf("生成第一个DKIM签名失败: %v - UUID: %s", err, uuid)
 		return nil, fmt.Errorf("failed to generate DKIM signature: %v", err)
 	}
-	logrus.Debugf("DKIM签名生成成功 - UUID: %s", uuid)
+	logrus.Debugf("第一个DKIM签名生成成功 - UUID: %s", uuid)
 
-	// 添加DKIM-Signature头
-	headers["DKIM-Signature"] = dkimSignature
-	logrus.Debugf("已添加DKIM-Signature头到邮件 - UUID: %s", uuid)
+	// 检查是否配置了第二个密钥（双签名）
+	if CONFIG.SMTP.DKIMPrivateKey2 != "" && CONFIG.SMTP.DKIMSelector2 != "" {
+		_, keyType2, _ := extractPublicKeyInfo(CONFIG.SMTP.DKIMPrivateKey2)
+		logrus.Infof("检测到双签名配置，使用选择器 [%s] 生成第二个DKIM签名 (算法: %s) - UUID: %s",
+			CONFIG.SMTP.DKIMSelector2, keyType2, uuid)
 
-	// 重建邮件内容
-	var buf bytes.Buffer
-	for k, v := range headers {
-		fmt.Fprintf(&buf, "%s: %s\r\n", k, v)
+		// 注意：第二个签名是对已经包含第一个签名的邮件进行的
+		signedData2, err := generateDKIMSignature(signedData, CONFIG.SMTP.DKIMPrivateKey2, CONFIG.SMTP.DKIMSelector2, domain)
+		if err != nil {
+			logrus.Warnf("生成第二个DKIM签名失败: %v - UUID: %s (继续使用单签名)", err, uuid)
+		} else {
+			signedData = signedData2
+			logrus.Infof("双签名完成 - UUID: %s", uuid)
+		}
 	}
-	buf.WriteString("\r\n")
 
-	// 附加原始邮件正文
-	body, err := io.ReadAll(msg.Body)
-	if err != nil {
-		logrus.Errorf("读取邮件正文失败: %v - UUID: %s", err, uuid)
-		return nil, err
-	}
-	buf.Write(body)
-
-	logrus.Infof("DMARC签名应用完成，邮件已重建 - UUID: %s", uuid)
-	return buf.Bytes(), nil
+	logrus.Infof("DMARC签名应用完成 - UUID: %s", uuid)
+	return signedData, nil
 }
 
-func generateDKIMSignature(emailData []byte, privateKey, selector, domain string) (string, error) {
+func generateDKIMSignature(emailData []byte, privateKey, selector, domain string) ([]byte, error) {
 	// 记录签名过程开始
 	logrus.Debugf("开始为域名 [%s] 使用选择器 [%s] 生成DKIM签名", domain, selector)
 	if len(privateKey) < 10 {
 		logrus.Warnf("DKIM私钥长度异常短: %d 字符", len(privateKey))
-		return "", fmt.Errorf("DKIM私钥长度异常短")
+		return nil, fmt.Errorf("DKIM私钥长度异常短")
 	}
+
+	// 检测密钥类型以设置正确的算法
+	_, keyType, err := extractPublicKeyInfo(privateKey)
+	if err != nil {
+		logrus.Errorf("无法检测密钥类型: %v", err)
+		return nil, fmt.Errorf("failed to detect key type: %v", err)
+	}
+
+	// 根据密钥类型选择算法
+	var algo string
+	switch keyType {
+	case "ed25519":
+		algo = "ed25519-sha256"
+		logrus.Debugf("检测到 Ed25519 密钥，使用算法: %s", algo)
+	default:
+		algo = "rsa-sha256"
+		logrus.Debugf("检测到 RSA 密钥，使用算法: %s", algo)
+	}
+
 	// 创建邮件数据的副本，因为签名过程会修改原始数据
 	emailCopy := make([]byte, len(emailData))
 	copy(emailCopy, emailData)
@@ -793,6 +802,7 @@ func generateDKIMSignature(emailData []byte, privateKey, selector, domain string
 	options.PrivateKey = []byte(privateKey)
 	options.Domain = domain
 	options.Selector = selector
+	options.Algo = algo                                                       // 根据密钥类型设置算法
 	options.SignatureExpireIn = 3600                                          // 签名有效期1小时
 	options.BodyLength = 0                                                    // 不限制正文长度
 	options.Headers = []string{"from", "to", "subject", "date", "message-id"} // 要签名的头部
@@ -801,63 +811,58 @@ func generateDKIMSignature(emailData []byte, privateKey, selector, domain string
 
 	// 直接对邮件数据进行签名
 	// 注意：Sign函数会直接修改传入的邮件数据，添加DKIM-Signature头
-	err := dkim.Sign(&emailCopy, options)
+	err = dkim.Sign(&emailCopy, options)
 	if err != nil {
 		logrus.Errorf("生成DKIM签名失败: %v", err)
-		return "", fmt.Errorf("failed to generate DKIM signature: %v", err)
-	}
-	// 从签名后的邮件中提取DKIM-Signature头
-	msg, err := mail.ReadMessage(bytes.NewReader(emailCopy))
-	if err != nil {
-		logrus.Errorf("解析签名后的邮件失败: %v", err)
-		return "", fmt.Errorf("failed to parse signed email: %v", err)
-	}
-	dkimSignature := msg.Header.Get("DKIM-Signature")
-	if dkimSignature == "" {
-		logrus.Errorf("无法从签名后的邮件中获取DKIM-Signature头")
-		return "", fmt.Errorf("DKIM-Signature header not found in signed email")
-	}
-	// 记录签名成功
-	if len(dkimSignature) > 30 {
-		logrus.Debugf("DKIM签名生成成功: %s...", dkimSignature[:30])
-	} else {
-		logrus.Debugf("DKIM签名生成成功: %s", dkimSignature)
+		return nil, fmt.Errorf("failed to generate DKIM signature: %v", err)
 	}
 
-	return dkimSignature, nil
+	// 验证签名是否成功添加（非严格必要，但用于确保逻辑正确）
+	// 通常如果 Sign 返回 nil，emailCopy 就已经包含了签名
+	// 这里我们直接返回 emailCopy，避免手动解析 header 和重新拼接
+	// 这样可以保留 dkim 库生成的正确的 header folding 格式，避免行超长问题
+
+	return emailCopy, nil
 }
 
 // 从私钥中提取公钥信息用于DKIM DNS记录
-func extractPublicKeyInfo(privateKeyPEM string) (string, error) {
+// 返回: 公钥Base64, 密钥类型(rsa/ed25519), 错误
+func extractPublicKeyInfo(privateKeyPEM string) (pubKeyBase64 string, keyType string, err error) {
 	// 解码PEM块
 	block, _ := pem.Decode([]byte(privateKeyPEM))
 	if block == nil {
-		return "", errors.New("failed to decode PEM block containing private key")
+		return "", "", errors.New("failed to decode PEM block containing private key")
 	}
-	// 解析私钥
-	var privKey *rsa.PrivateKey
-	var err error
-	// 尝试PKCS1格式
-	privKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
-		// 尝试PKCS8格式
-		key, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes)
-		if parseErr != nil {
-			//logrus.Errorf("Failed to parse private key: %v", parseErr)
-			return "", errors.New("failed to parse private key: not PKCS1 or PKCS8 format")
+
+	// 首先尝试PKCS8格式（通用格式，支持多种密钥类型）
+	key, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if parseErr == nil {
+		switch k := key.(type) {
+		case *rsa.PrivateKey:
+			// RSA 密钥
+			pubKeyBytes, marshalErr := x509.MarshalPKIXPublicKey(&k.PublicKey)
+			if marshalErr != nil {
+				return "", "", errors.New("failed to marshal RSA public key")
+			}
+			return base64.StdEncoding.EncodeToString(pubKeyBytes), "rsa", nil
+		case ed25519.PrivateKey:
+			// Ed25519 密钥
+			pubKey := k.Public().(ed25519.PublicKey)
+			return base64.StdEncoding.EncodeToString(pubKey), "ed25519", nil
+		default:
+			return "", "", errors.New("unsupported private key type")
 		}
-		var ok bool
-		privKey, ok = key.(*rsa.PrivateKey)
-		if !ok {
-			return "", errors.New("private key is not RSA type")
+	}
+
+	// 尝试PKCS1格式（仅RSA）
+	rsaKey, rsaErr := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if rsaErr == nil {
+		pubKeyBytes, marshalErr := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
+		if marshalErr != nil {
+			return "", "", errors.New("failed to marshal RSA public key")
 		}
+		return base64.StdEncoding.EncodeToString(pubKeyBytes), "rsa", nil
 	}
-	// 序列化公钥
-	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
-	if err != nil {
-		return "", errors.New("failed to marshal public key")
-	}
-	// Base64编码
-	pubKeyBase64 := base64.StdEncoding.EncodeToString(pubKeyBytes)
-	return pubKeyBase64, nil
+
+	return "", "", errors.New("failed to parse private key: unsupported format")
 }

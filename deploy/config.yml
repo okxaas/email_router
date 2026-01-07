@@ -19,6 +19,11 @@ smtp:
     .......
     -----END PRIVATE KEY-----
   dkim_selector: "dkim" # DKIM选择器
+  dkim_private_key_2: |   # 第二个 DKIM 私钥（可选，支持Ed25519）
+    -----BEGIN PRIVATE KEY-----
+    ...
+    -----END PRIVATE KEY-----
+  dkim_selector_2: "ed"   # 第二个选择器（可选）
 webhook:
   enabled: False                        # 是否启用Webhook功能
   method: "POST"                       # HTTP方法，例如POST或GET
