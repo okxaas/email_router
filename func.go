@@ -305,6 +305,11 @@ func sendToTelegramBot(message string, traceid string) {
 	chatID := CONFIG.Telegram.ChatID
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
 
+	// HTTP client with timeout
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
 	// 分割消息
 	messages := splitMessage(message, telegramMaxLength)
 
@@ -320,17 +325,17 @@ func sendToTelegramBot(message string, traceid string) {
 			return
 		}
 
-		resp, err := http.Post(apiURL, "application/json", bytes.NewBuffer(jsonPayload))
+		resp, err := client.Post(apiURL, "application/json", bytes.NewBuffer(jsonPayload))
 		if err != nil {
 			logrus.Errorf("Failed to send message to Telegram bot - TraceID: %s, Error: %v", traceid, err)
 			return
 		}
-		defer resp.Body.Close()
 
 		logrus.Infof("Message sent to Telegram bot - TraceID: %s, Response: %s", traceid, resp.Status)
 		if resp.StatusCode != 200 {
 			logrus.Warnf("Non-200 response from Telegram bot - TraceID: %s", traceid)
 		}
+		resp.Body.Close() // Close immediately instead of defer in loop
 	}
 }
 
@@ -396,7 +401,9 @@ func sendRawEMLToTelegram(emailData []byte, subject string, traceid string) {
 		return
 	}
 	req.Header.Add("Content-Type", writer.FormDataContentType())
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 60 * time.Second, // Longer timeout for file upload
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		logrus.Errorf("Failed to send email as EML to Telegram - TraceID: %s, Error: %v", traceid, err)
@@ -540,10 +547,19 @@ func forwardEmailToTargetAddress(emailData []byte, formattedSender string, targe
 
 	// Modify email data
 	var modifiedEmailData []byte
-	//modifiedEmailData, _ = []byte(removeEmailHeaders()[])
-	modifiedEmailData, _ = removeEmailHeaders(emailData, []string{"DKIM-*", "Authentication-*"})
+	var headerErr error
+	
+	modifiedEmailData, headerErr = removeEmailHeaders(emailData, []string{"DKIM-*", "Authentication-*"})
+	if headerErr != nil {
+		logrus.Warnf("Failed to remove headers: %v - UUID: %s", headerErr, s.UUID)
+		modifiedEmailData = emailData // fallback to original
+	}
+	
 	if strings.EqualFold(targetAddress, CONFIG.SMTP.PrivateEmail) {
-		modifiedEmailData, _ = modifyEmailHeaders(modifiedEmailData, formattedSender, "")
+		modifiedEmailData, headerErr = modifyEmailHeaders(modifiedEmailData, formattedSender, "")
+		if headerErr != nil {
+			logrus.Warnf("Failed to modify headers: %v - UUID: %s", headerErr, s.UUID)
+		}
 		headersToAdd := map[string]string{
 			"Original-From":       s.from,
 			"Original-To":         strings.Join(s.to, ","),
@@ -553,14 +569,26 @@ func forwardEmailToTargetAddress(emailData []byte, formattedSender string, targe
 			"Message-Id":          fmt.Sprintf("<%s@%s>", s.UUID, senderDomain),
 			"UUID":                s.UUID,
 		}
-		modifiedEmailData, _ = addEmailHeaders(modifiedEmailData, headersToAdd)
+		modifiedEmailData, headerErr = addEmailHeaders(modifiedEmailData, headersToAdd)
+		if headerErr != nil {
+			logrus.Warnf("Failed to add headers: %v - UUID: %s", headerErr, s.UUID)
+		}
 	} else {
-		modifiedEmailData, _ = modifyEmailHeaders(modifiedEmailData, formattedSender, targetAddress)
-		modifiedEmailData, _ = removeEmailHeaders(modifiedEmailData, headersToRemove)
+		modifiedEmailData, headerErr = modifyEmailHeaders(modifiedEmailData, formattedSender, targetAddress)
+		if headerErr != nil {
+			logrus.Warnf("Failed to modify headers: %v - UUID: %s", headerErr, s.UUID)
+		}
+		modifiedEmailData, headerErr = removeEmailHeaders(modifiedEmailData, headersToRemove)
+		if headerErr != nil {
+			logrus.Warnf("Failed to remove headers: %v - UUID: %s", headerErr, s.UUID)
+		}
 		headersToAdd := map[string]string{
 			"Message-Id": fmt.Sprintf("<%s@%s>", s.UUID, senderDomain),
 		}
-		modifiedEmailData, _ = addEmailHeaders(modifiedEmailData, headersToAdd)
+		modifiedEmailData, headerErr = addEmailHeaders(modifiedEmailData, headersToAdd)
+		if headerErr != nil {
+			logrus.Warnf("Failed to add headers: %v - UUID: %s", headerErr, s.UUID)
+		}
 	}
 	if useDMARC {
 		var dkimErr error
@@ -653,7 +681,9 @@ func sendWebhook(config WebhookConfig, title, content string, traceid string) (*
 	} else if config.BodyType == "form" {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		logrus.Errorf("Failed to send webhook request - TraceID: %s, Error: %v", traceid, err)

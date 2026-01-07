@@ -1,9 +1,16 @@
 package main
 
-import "blitiri.com.ar/go/spf"
+import (
+	"regexp"
+
+	"blitiri.com.ar/go/spf"
+)
 
 var headersToRemove = []string{"x-*", "x-spam-*", "x-mailer", "x-originating-*", "x-qq-*", "dkim-*", "x-google-*", "x-cm-*", "x-coremail-*", "x-bq-*", "message-id"}
 var CONFIG Config
+
+// Pre-compiled regex patterns for better performance
+var recipientPattern = regexp.MustCompile(`^(\w|-)+@.+$`)
 
 const headerPrefix = "X-ROUTER-"
 const telegramMaxLength = 4096

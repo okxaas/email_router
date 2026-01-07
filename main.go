@@ -2,14 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
 	"mime"
 	"net"
 	"os"
-	"regexp"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jhillyerd/enmime"
@@ -60,7 +62,7 @@ func main() {
 			logrus.Infof("%s._domainkey.%s.\t1\tIN\tTXT\t\"v=DKIM1; k=rsa; p=%s\"",
 				CONFIG.SMTP.DKIMSelector, domain, func() string {
 					pubKey, pkErr := extractPublicKeyInfo(CONFIG.SMTP.DKIMPrivateKey)
-					if err != nil {
+					if pkErr != nil {
 						logrus.Errorf("获取公钥信息失败: %v", pkErr)
 						return ""
 					}
@@ -78,6 +80,13 @@ func main() {
 
 	be := &Backend{}
 
+	// Setup graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
 	// Plain SMTP server with STARTTLS support
 	plainServer := smtp.NewServer(be)
 	plainServer.Addr = CONFIG.SMTP.ListenAddress
@@ -94,10 +103,25 @@ func main() {
 		logrus.Warnf("Loading TLS certificate failed: %v", err)
 		logrus.Infof("Starting plainServer only at %s", CONFIG.SMTP.ListenAddress)
 
-		// Start only the plain SMTP server with STARTTLS in a new goroutine
-		if err := plainServer.ListenAndServe(); err != nil {
-			logrus.Fatal(err)
+		// Start only the plain SMTP server
+		go func() {
+			if err := plainServer.ListenAndServe(); err != nil {
+				logrus.Errorf("Plain server error: %v", err)
+			}
+		}()
+
+		// Wait for shutdown signal
+		<-sigChan
+		logrus.Info("Received shutdown signal, gracefully stopping...")
+		cancel()
+
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+
+		if err := plainServer.Shutdown(shutdownCtx); err != nil {
+			logrus.Errorf("Error shutting down plain server: %v", err)
 		}
+		logrus.Info("Server stopped gracefully")
 	} else {
 		// Certificate loaded successfully, configure STARTTLS
 		plainServer.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cer}}
@@ -117,16 +141,36 @@ func main() {
 		go func() {
 			logrus.Infof("Starting plainServer at %s", CONFIG.SMTP.ListenAddress)
 			if err := plainServer.ListenAndServe(); err != nil {
-				logrus.Fatal(err)
+				logrus.Errorf("Plain server error: %v", err)
 			}
 		}()
 
-		// Start the SMTPS server (TLS only)
-		logrus.Infof("Starting tlsServer at %s", CONFIG.SMTP.ListenAddressTls)
-		if err := tlsServer.ListenAndServeTLS(); err != nil {
-			logrus.Fatal(err)
+		// Start the SMTPS server (TLS only) in a new goroutine
+		go func() {
+			logrus.Infof("Starting tlsServer at %s", CONFIG.SMTP.ListenAddressTls)
+			if err := tlsServer.ListenAndServeTLS(); err != nil {
+				logrus.Errorf("TLS server error: %v", err)
+			}
+		}()
+
+		// Wait for shutdown signal
+		<-sigChan
+		logrus.Info("Received shutdown signal, gracefully stopping...")
+		cancel()
+
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+
+		// Shutdown both servers
+		if err := plainServer.Shutdown(shutdownCtx); err != nil {
+			logrus.Errorf("Error shutting down plain server: %v", err)
 		}
+		if err := tlsServer.Shutdown(shutdownCtx); err != nil {
+			logrus.Errorf("Error shutting down TLS server: %v", err)
+		}
+		logrus.Info("Servers stopped gracefully")
 	}
+	_ = ctx // suppress unused variable warning
 }
 func SPFCheck(s *Session) *smtp.SMTPError {
 	remoteHost, _, err := net.SplitHostPort(s.remoteIP)
@@ -227,7 +271,7 @@ func (s *Session) Data(r io.Reader) error {
 	}
 	sender := extractEmails(env.GetHeader("From"))
 	recipient := getFirstMatchingEmail(s.to)
-	if !strings.EqualFold(sender, CONFIG.SMTP.PrivateEmail) && !strings.Contains(recipient, "_at_") && !regexp.MustCompile(`^(\w|-)+@.+$`).MatchString(recipient) {
+	if !strings.EqualFold(sender, CONFIG.SMTP.PrivateEmail) && !strings.Contains(recipient, "_at_") && !recipientPattern.MatchString(recipient) {
 		// 验证收件人的规则
 		logrus.Warnf("不符合规则的收件人，需要是 random@qq.com、ran-dom@qq.com，当前为 %s - UUID: %s", recipient, s.UUID)
 		return &smtp.SMTPError{
