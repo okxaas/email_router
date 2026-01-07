@@ -126,32 +126,56 @@ func main() {
 		// Certificate loaded successfully, configure STARTTLS
 		plainServer.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cer}}
 
-		// SMTPS server (TLS only)
-		tlsServer := smtp.NewServer(be)
-		tlsServer.Addr = CONFIG.SMTP.ListenAddressTls
-		tlsServer.Domain = GetEnv("MXDOMAIN", "localhost")
-		tlsServer.WriteTimeout = 10 * time.Second
-		tlsServer.ReadTimeout = 10 * time.Second
-		tlsServer.MaxMessageBytes = 1024 * 1024
-		tlsServer.MaxRecipients = 50
-		tlsServer.AllowInsecureAuth = false
-		tlsServer.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cer}}
+		// Submission server (port 587) - uses STARTTLS, not implicit TLS
+		submissionServer := smtp.NewServer(be)
+		submissionServer.Addr = CONFIG.SMTP.ListenAddressTls
+		submissionServer.Domain = GetEnv("MXDOMAIN", "localhost")
+		submissionServer.WriteTimeout = 10 * time.Second
+		submissionServer.ReadTimeout = 10 * time.Second
+		submissionServer.MaxMessageBytes = 1024 * 1024
+		submissionServer.MaxRecipients = 50
+		submissionServer.AllowInsecureAuth = false
+		submissionServer.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cer}}
 
-		// Start the plain SMTP server with STARTTLS in a new goroutine
+		// SMTPS server (port 465) - uses implicit TLS
+		var smtpsServer *smtp.Server
+		if CONFIG.SMTP.ListenAddressSmtps != "" {
+			smtpsServer = smtp.NewServer(be)
+			smtpsServer.Addr = CONFIG.SMTP.ListenAddressSmtps
+			smtpsServer.Domain = GetEnv("MXDOMAIN", "localhost")
+			smtpsServer.WriteTimeout = 10 * time.Second
+			smtpsServer.ReadTimeout = 10 * time.Second
+			smtpsServer.MaxMessageBytes = 1024 * 1024
+			smtpsServer.MaxRecipients = 50
+			smtpsServer.AllowInsecureAuth = false
+			smtpsServer.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cer}}
+		}
+
+		// Start the plain SMTP server (port 25) with STARTTLS support
 		go func() {
-			logrus.Infof("Starting plainServer at %s", CONFIG.SMTP.ListenAddress)
+			logrus.Infof("Starting SMTP server at %s", CONFIG.SMTP.ListenAddress)
 			if err := plainServer.ListenAndServe(); err != nil {
-				logrus.Errorf("Plain server error: %v", err)
+				logrus.Errorf("SMTP server error: %v", err)
 			}
 		}()
 
-		// Start the SMTPS server (TLS only) in a new goroutine
+		// Start the Submission server (port 587) with STARTTLS support
 		go func() {
-			logrus.Infof("Starting tlsServer at %s", CONFIG.SMTP.ListenAddressTls)
-			if err := tlsServer.ListenAndServeTLS(); err != nil {
-				logrus.Errorf("TLS server error: %v", err)
+			logrus.Infof("Starting Submission server at %s", CONFIG.SMTP.ListenAddressTls)
+			if err := submissionServer.ListenAndServe(); err != nil {
+				logrus.Errorf("Submission server error: %v", err)
 			}
 		}()
+
+		// Start the SMTPS server (port 465) with implicit TLS
+		if smtpsServer != nil {
+			go func() {
+				logrus.Infof("Starting SMTPS server at %s", CONFIG.SMTP.ListenAddressSmtps)
+				if err := smtpsServer.ListenAndServeTLS(); err != nil {
+					logrus.Errorf("SMTPS server error: %v", err)
+				}
+			}()
+		}
 
 		// Wait for shutdown signal
 		<-sigChan
@@ -161,12 +185,17 @@ func main() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
 
-		// Shutdown both servers
+		// Shutdown all servers
 		if err := plainServer.Shutdown(shutdownCtx); err != nil {
-			logrus.Errorf("Error shutting down plain server: %v", err)
+			logrus.Errorf("Error shutting down SMTP server: %v", err)
 		}
-		if err := tlsServer.Shutdown(shutdownCtx); err != nil {
-			logrus.Errorf("Error shutting down TLS server: %v", err)
+		if err := submissionServer.Shutdown(shutdownCtx); err != nil {
+			logrus.Errorf("Error shutting down Submission server: %v", err)
+		}
+		if smtpsServer != nil {
+			if err := smtpsServer.Shutdown(shutdownCtx); err != nil {
+				logrus.Errorf("Error shutting down SMTPS server: %v", err)
+			}
 		}
 		logrus.Info("Servers stopped gracefully")
 	}

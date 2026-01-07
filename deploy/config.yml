@@ -4,9 +4,10 @@ telegram:
   send_eml: False           # 是否通过Telegram发送邮件通知
 
 smtp:
-  listen_address: "0.0.0.0:25"         # SMTP服务器监听的地址
-  listen_address_tls: "0.0.0.0:587"    # TLS的监听地址
-  allowed_domains:                     # 允许的域名列表
+  listen_address: "0.0.0.0:25"           # Port 25 - SMTP (收信)
+  listen_address_tls: "0.0.0.0:587"      # Port 587 - Submission (STARTTLS)
+  listen_address_smtps: "0.0.0.0:465"    # Port 465 - SMTPS (隐式TLS，可选，留空则不启用)
+  allowed_domains:                       # 允许的域名列表
     - "domain.local"
   cert_file: "/cert/fullchain.pem"     # TLS证书路径
   key_file: "/cert/key.pem"            # TLS私钥路径

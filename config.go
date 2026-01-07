@@ -22,15 +22,16 @@ type Config struct {
 }
 
 type SMTPConfig struct {
-	ListenAddress    string   `yaml:"listen_address"`
-	ListenAddressTls string   `yaml:"listen_address_tls"`
-	AllowedDomains   []string `yaml:"allowed_domains"`
-	PrivateEmail     string   `yaml:"private_email"`
-	CertFile         string   `yaml:"cert_file"`
-	KeyFile          string   `yaml:"key_file"`
-	EnableDMARC      bool     `yaml:"enable_dmarc"`
-	DKIMPrivateKey   string   `yaml:"dkim_private_key"`
-	DKIMSelector     string   `yaml:"dkim_selector"`
+	ListenAddress      string   `yaml:"listen_address"`       // Port 25 - SMTP
+	ListenAddressTls   string   `yaml:"listen_address_tls"`   // Port 587 - Submission (STARTTLS)
+	ListenAddressSmtps string   `yaml:"listen_address_smtps"` // Port 465 - SMTPS (Implicit TLS)
+	AllowedDomains     []string `yaml:"allowed_domains"`
+	PrivateEmail       string   `yaml:"private_email"`
+	CertFile           string   `yaml:"cert_file"`
+	KeyFile            string   `yaml:"key_file"`
+	EnableDMARC        bool     `yaml:"enable_dmarc"`
+	DKIMPrivateKey     string   `yaml:"dkim_private_key"`
+	DKIMSelector       string   `yaml:"dkim_selector"`
 }
 
 type TelegramConfig struct {

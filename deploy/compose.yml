@@ -29,8 +29,9 @@ services:
     environment:
       - MXDOMAIN=${MXDOMAIN}
     ports:
-      - "25:25"
-      - "587:587"
+      - "25:25"     # SMTP
+      - "587:587"   # Submission (STARTTLS)
+      - "465:465"   # SMTPS (Implicit TLS)
     depends_on:
       acme:
         condition: service_healthy

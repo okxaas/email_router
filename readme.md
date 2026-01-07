@@ -11,13 +11,21 @@
 - **SMTP 邮件发送：** 提供邮件发送功能，可以通过你定义的**私人邮箱地址**将邮件转发给指定的收件人。
 ![](./images/qqmail.png)
 
-## 部署步骤
+## 端口说明
 
+| 端口 | 协议 | 加密方式 | 用途 |
+|------|------|----------|------|
+| **25** | SMTP | STARTTLS 可选 | 服务器间收信 |
+| **587** | Submission | STARTTLS | 客户端发信（推荐） |
+| **465** | SMTPS | 隐式 TLS | 客户端发信（旧版兼容） |
+
+## 部署步骤
 
 ### 前置准备
 
 #### 1. 服务器准备
 公网IP（以223.223.223.223为例），25端口可达 (可以通过本项目内的`check_port_25_connectivity.sh`进行测试) ，服务器安装好Docker，设置PTR记录（可选，如果只收信则不需要）
+
 #### 2. 域名准备
 想要使用的域名（以404.local、403.local为例）  
 
@@ -41,6 +49,7 @@ mx1.404.local.	1	IN	A	223.223.223.223
 403.local.	1	IN	TXT	"v=spf1 include:404.local -all"
 ```
 （不一定非要mx1前缀，任意都可）
+
 ### 1. 克隆仓库
 
 ```bash
@@ -58,28 +67,55 @@ MXDOMAIN= #mx服务器的域名，用来申请证书，按照本文中的例子�
 CF_Token= # 权限需要可以操作 404.local的DNS解析
 CF_Zone_ID= # 404.local的Zone ID
 ```
+
 ### 3. config.yml配置
 ```yml
 telegram:
   bot_token: "<你的_bot_token>"
   chat_id: "<你的_chat_id>"
+  send_eml: false  # 是否通过Telegram发送原始EML文件
 
 smtp:
-  listen_address: "0.0.0.0:25"
-  listen_address_tls: "0.0.0.0:587"
+  listen_address: "0.0.0.0:25"           # Port 25 - SMTP (收信)
+  listen_address_tls: "0.0.0.0:587"      # Port 587 - Submission (STARTTLS)
+  listen_address_smtps: "0.0.0.0:465"    # Port 465 - SMTPS (隐式TLS，可留空不启用)
   allowed_domains:
     - "404.local"
     - "403.local"
   cert_file: "/cert/fullchain.pem"
   key_file: "/cert/key.pem"
   private_email: "root123645@foxmail.com"
+  enable_dmarc: false                    # 是否启用DMARC签名
+  dkim_selector: "dkim"                  # DKIM选择器
+  dkim_private_key: |                    # DKIM私钥（仅enable_dmarc为true时需要）
+    -----BEGIN PRIVATE KEY-----
+    ...
+    -----END PRIVATE KEY-----
+
+webhook:
+  enabled: false                         # 是否启用Webhook通知
+  method: "POST"
+  url: "https://example.com/webhook"
+  headers:
+    Authorization: "Bearer my-token"
+  body:
+    title: "新邮件: {{.Title}}"
+    content: "详情: {{.Content}}"
+  bodyType: "json"
 ```
-需要修改的有 telegram相关，allowed_domains修改为自己的域名，private_email修改为要转发到的邮箱。
+
+需要修改的有：
+- `telegram` 相关配置
+- `allowed_domains` 修改为自己的域名
+- `private_email` 修改为要转发到的邮箱
+- `listen_address_smtps` 如不需要465端口可留空
+
 ### 4. 启动
 ```shell 
 docker compose up -d 
 ```
 由于初次启动需要申请证书，所以需要一点时间来启动，只有有效的证书才能启动邮件服务。
+
 ### 5. 收件
 为防止出现未知问题，程序对收件地址的规则做了限制。允许的收件地址规则为`^(\w|-)+@.+$`  
 例如以下：
@@ -93,15 +129,19 @@ docker compose up -d
 
 ### 6. 发件
 与[DuckDuckGo Email Protection](https://duckduckgo.com/duckduckgo-help-pages/email-protection/duck-addresses/how-do-i-compose-a-new-email/) 的逻辑一样
-> For example, if your personal Duck Address is jane@duck.com and you want to send to your friend’s email brian@gmail.com. To send the email from your personal Duck Address, you would send the message to brian_at_gmail.com_jane@duck.com.  
+> For example, if your personal Duck Address is jane@duck.com and you want to send to your friend's email brian@gmail.com. To send the email from your personal Duck Address, you would send the message to brian_at_gmail.com_jane@duck.com.  
 
 其中 jane 可以是你喜欢的、你需要的 任意前缀，因为这是你的域名。  
 同样的，直接回复收到的转发的来信，服务器也会帮你自动转发回去。  
 
 需要注意的是，发信非常依赖信誉，你的IP信誉、域名信誉、PTR设置等。如果你发现私人邮箱收到的邮件在垃圾箱，可以手动加白下，很有可能发送给别人的也进了垃圾箱。
 
-
 ## 其他问题
-### todo 
-- [x] spf check
+
+### TODO 
+- [x] SPF check
+- [x] 多端口支持 (25/587/465)
+- [x] Graceful shutdown
 - [ ] 证书自动续期相关逻辑
+- [ ] SMTP AUTH 认证
+- [ ] IMAP 收信支持
