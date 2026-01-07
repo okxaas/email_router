@@ -291,7 +291,7 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 		return &smtp.SMTPError{
 			Code:         550,
 			EnhancedCode: smtp.EnhancedCode{5, 1, 1},
-			Message:      "Recipient address disabled",
+			Message:      "User unknown",
 		}
 	}
 
@@ -435,8 +435,8 @@ func (s *Session) Data(r io.Reader) error {
 		logrus.Warnf("不符合规则的收件人，需要是 random@qq.com、ran-dom@qq.com，当前为 %s - UUID: %s", recipientAddress, s.UUID)
 		return &smtp.SMTPError{
 			Code:         550,
-			EnhancedCode: smtp.EnhancedCode{5, 1, 0},
-			Message:      "Invalid recipient",
+			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+			Message:      "Policy rejection: Invalid recipient format",
 		}
 	}
 	var outsite2private bool

@@ -279,7 +279,7 @@ func SPFCheck(s *Session) *smtp.SMTPError {
 	switch s.spfResult {
 	case spf.None:
 		logrus.Warnf("SPF Result: NONE - No SPF record found for domain %s. Rejecting email.", getDomainFromEmail(s.from))
-		return &smtp.SMTPError{Code: 450, EnhancedCode: smtp.EnhancedCode{5, 0, 0}, Message: "SPF check softfail (no SPF record)"}
+		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 23}, Message: "SPF validation failed: No SPF record"}
 	case spf.Neutral:
 		logrus.Infof("SPF Result: NEUTRAL - Domain %s neither permits nor denies sending mail from IP %s", getDomainFromEmail(s.from), s.remoteIP)
 	case spf.Pass:
@@ -289,13 +289,13 @@ func SPFCheck(s *Session) *smtp.SMTPError {
 		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 0}, Message: "SPF check failed"}
 	case spf.SoftFail:
 		logrus.Warnf("SPF Result: SOFTFAIL - SPF check soft failed for domain %s, email is suspicious", getDomainFromEmail(s.from))
-		return &smtp.SMTPError{Code: 450, EnhancedCode: smtp.EnhancedCode{5, 0, 1}, Message: "SPF check softfail"}
+		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 23}, Message: "SPF validation failed: SoftFail"}
 	case spf.TempError:
 		logrus.Warnf("SPF Result: TEMPERROR - Temporary SPF error occurred for domain %s, retry might succeed", getDomainFromEmail(s.from))
 		return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 0, 0}, Message: "Temporary SPF check error"}
 	case spf.PermError:
 		logrus.Warnf("SPF Result: PERMERROR - Permanent SPF error for domain %s, SPF record is invalid", getDomainFromEmail(s.from))
-		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 2}, Message: "SPF check permanent error"}
+		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 5, 2}, Message: "SPF validation failed: Syntax error"}
 	}
 	return nil // SPF 检查通过，返回 nil
 }
